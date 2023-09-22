@@ -1,0 +1,97 @@
+from datetime import datetime, timedelta, timezone
+from azure.storage.blob import BlobServiceClient
+from flask import Flask, jsonify
+
+# Constants
+source_account_url = "MINHA_KEY"
+source_account_key = "MINHA_KEY"
+destination_account_url = "MINHA_KEY"
+destination_account_key = "MINHA_KEY"
+source_container_name = "SOURCE_NAME"
+destination_container_name = "DESTINATION_NAME"
+remaining_time_timedelta = timedelta(days=5)
+current_time = datetime.now(timezone.utc)
+
+# Create a BlobServiceClient for both source and destination accounts
+source_blob_service_client = BlobServiceClient(account_url=source_account_url, credential=source_account_key)
+destination_blob_service_client = BlobServiceClient(account_url=destination_account_url, credential=destination_account_key)
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# List to store the status of blobs
+status_list = []
+
+# Function to copy and move blobs
+def copy_and_move_blobs():
+    global status_list
+    status_list = []  # Clear the status list before updating it
+
+    # Get blobs from the source container
+    source_container_client = source_blob_service_client.get_container_client(source_container_name)
+    source_blobs = source_container_client.list_blobs()
+
+    # Copy and move blobs
+    for source_blob in source_blobs:
+        try:
+            # Calculate the remaining time to reach the conversion criteria
+            time_difference = source_blob.last_modified + remaining_time_timedelta - current_time
+            remaining_time_str = str(time_difference)
+
+            # Check if the blob meets the conversion criteria
+            if source_blob.last_modified < (current_time - remaining_time_timedelta):
+                # Check the blob type (block blob or page blob)
+                source_blob_properties = source_container_client.get_blob_client(source_blob.name).get_blob_properties()
+                blob_type = source_blob_properties.get('blob_type')
+
+                if blob_type == 'BlockBlob':
+                    # Create the destination blob client
+                    destination_container_client = destination_blob_service_client.get_container_client(destination_container_name)
+                    destination_blob_client = destination_container_client.get_blob_client(source_blob.name)
+
+                    # Start the copy operation from the source blob's URL
+                    source_blob_url = f"{source_account_url}/{source_container_name}/{source_blob.name}"
+                    destination_blob_client.start_copy_from_url(source_blob_url)
+
+                    # Wait for the copy operation to complete
+                    destination_blob_client.wait_for_copy()
+
+                    # Delete the blob from the source container
+                    source_blob_client = source_container_client.get_blob_client(source_blob.name)
+                    source_blob_client.delete_blob()
+                else:
+                    # Blob is not of type BlockBlob, handle as needed
+                    pass  # You can add handling for other blob types if necessary
+            else:
+                # Add the status of the non-converted blob to the status list
+                status_list.append({
+                    "blob_name": source_blob.name,
+                    "status": "Not converted",
+                    "remaining_time": remaining_time_str
+                })
+                # Print the error message in the terminal
+                print(f"The blob '{source_blob.name}' was not converted because it did not meet the conversion criteria. Estimated remaining time: {remaining_time_str}")
+        except Exception as e:
+            # Add the status of the blob with an error to the status list
+            status_list.append({
+                "blob_name": source_blob.name,
+                "status": "Error",
+                "error_message": str(e)
+            })
+            # Print the error message in the terminal
+            print(f"Error processing blob {source_blob.name}: {str(e)}")
+# Route to display the status
+@app.route('/status', methods=['GET'])
+def get_status():
+    global status_list
+    copy_and_move_blobs()
+    total_pending_blobs = len(status_list)
+
+    # Build the status message
+    status_message = f"Blobs convertidos: [] (nenhum), Status da aplicação [Em andamento], Blobs pendentes: {total_pending_blobs}"
+
+    return status_message
+
+# Run the Flask app
+if __name__ == '__main__':
+    app.run()
